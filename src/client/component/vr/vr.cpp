@@ -18,6 +18,9 @@
 #include <chrono>
 #include <string>
 #include <cstring>
+#include <cstdarg>
+#include <cstdio>
+#include <mutex>
 
 #ifndef XR_USE_PLATFORM_WIN32
 #define XR_USE_PLATFORM_WIN32
@@ -58,6 +61,39 @@ namespace vr
 
 		std::vector<XrView> runtime_views;
 		std::vector<XrViewConfigurationView> runtime_view_configs;
+
+		void trace(const char* format, ...) noexcept
+		{
+			try
+			{
+				static std::mutex trace_mutex;
+				std::lock_guard<std::mutex> lock(trace_mutex);
+				char message[32768]{};
+				va_list args;
+				va_start(args, format);
+				vsnprintf(message, sizeof(message), format, args);
+				va_end(args);
+				SYSTEMTIME now{};
+				GetLocalTime(&now);
+				char line[33024]{};
+				const int length = snprintf(line, sizeof(line),
+					"%04u-%02u-%02u %02u:%02u:%02u.%03u pid=%lu tid=%lu %s\r\n",
+					now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute,
+					now.wSecond, now.wMilliseconds, GetCurrentProcessId(), GetCurrentThreadId(), message);
+				if (length <= 0) return;
+				CreateDirectoryA("iw7-mod", nullptr);
+				CreateDirectoryA("iw7-mod/logs", nullptr);
+				const HANDLE file = CreateFileA("iw7-mod/logs/iwvr-bootstrap.log", FILE_APPEND_DATA,
+					FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_ALWAYS,
+					FILE_ATTRIBUTE_NORMAL, nullptr);
+				if (file == INVALID_HANDLE_VALUE) return;
+				DWORD written = 0;
+				WriteFile(file, line, static_cast<DWORD>(std::min<int>(length, sizeof(line) - 1)), &written, nullptr);
+				FlushFileBuffers(file);
+				CloseHandle(file);
+			}
+			catch (...) {}
+		}
 
 		std::string result_to_string(const XrResult result)
 		{
@@ -117,6 +153,15 @@ namespace vr
 			}
 		}
 
+		void trace_result(const char* function, const XrResult result)
+		{
+			trace("%s result: %d %s", function, static_cast<int>(result), result_to_string(result).c_str());
+			if (XR_FAILED(result))
+			{
+				trace("FAILURE %s %d %s", function, static_cast<int>(result), result_to_string(result).c_str());
+			}
+		}
+
 		std::string session_state_to_string(const XrSessionState state)
 		{
 			switch (state)
@@ -149,7 +194,7 @@ namespace vr
 		{
 			if (session_running && session != XR_NULL_HANDLE)
 			{
-				xrEndSession(session);
+				trace_result("xrEndSession", xrEndSession(session));
 				session_running = false;
 			}
 
@@ -182,9 +227,11 @@ namespace vr
 
 		bool init_openxr()
 		{
+			trace("init_openxr begin");
 			// 1. Enumerate OpenXR instance extensions
 			uint32_t extension_count = 0;
 			XrResult res = xrEnumerateInstanceExtensionProperties(nullptr, 0, &extension_count, nullptr);
+			trace_result("xrEnumerateInstanceExtensionProperties count", res);
 			if (XR_FAILED(res))
 			{
 				console::error("VR Error: xrEnumerateInstanceExtensionProperties failed: %s\n", result_to_string(res).c_str());
@@ -194,6 +241,7 @@ namespace vr
 
 			std::vector<XrExtensionProperties> extensions(extension_count, { XR_TYPE_EXTENSION_PROPERTIES });
 			res = xrEnumerateInstanceExtensionProperties(nullptr, extension_count, &extension_count, extensions.data());
+			trace_result("xrEnumerateInstanceExtensionProperties list", res);
 			if (XR_FAILED(res))
 			{
 				console::error("VR Error: Failed to retrieve extension properties: %s\n", result_to_string(res).c_str());
@@ -213,8 +261,10 @@ namespace vr
 			}
 
 			// 2. Require XR_KHR_D3D11_ENABLE_EXTENSION_NAME
+			trace("XR_KHR_D3D11_enable available: %s", has_d3d11 ? "yes" : "no");
 			if (!has_d3d11)
 			{
+				trace("FAILURE required extension XR_KHR_D3D11_enable unavailable");
 				console::error("VR Error: Required extension '%s' is not supported by the OpenXR runtime.\n",
 					XR_KHR_D3D11_ENABLE_EXTENSION_NAME);
 				shutdown();
@@ -236,6 +286,7 @@ namespace vr
 			instance_ci.enabledExtensionNames = enabled_extensions;
 
 			res = xrCreateInstance(&instance_ci, &instance);
+			trace_result("xrCreateInstance", res);
 			if (XR_FAILED(res))
 			{
 				console::error("VR Error: xrCreateInstance failed: %s\n", result_to_string(res).c_str());
@@ -244,8 +295,13 @@ namespace vr
 			}
 
 			XrInstanceProperties instance_props{ XR_TYPE_INSTANCE_PROPERTIES };
-			if (XR_SUCCEEDED(xrGetInstanceProperties(instance, &instance_props)))
+			const XrResult instance_props_result = xrGetInstanceProperties(instance, &instance_props);
+			trace_result("xrGetInstanceProperties", instance_props_result);
+			if (XR_SUCCEEDED(instance_props_result))
 			{
+				trace("runtime name: %s", instance_props.runtimeName);
+				trace("runtime version: %u.%u.%u", XR_VERSION_MAJOR(instance_props.runtimeVersion),
+					XR_VERSION_MINOR(instance_props.runtimeVersion), XR_VERSION_PATCH(instance_props.runtimeVersion));
 				console::info("VR: OpenXR Runtime: %s (%u.%u.%u)\n",
 					instance_props.runtimeName,
 					XR_VERSION_MAJOR(instance_props.runtimeVersion),
@@ -257,6 +313,7 @@ namespace vr
 			XrSystemGetInfo system_info{ XR_TYPE_SYSTEM_GET_INFO };
 			system_info.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
 			res = xrGetSystem(instance, &system_info, &system_id);
+			trace_result("xrGetSystem", res);
 			if (XR_FAILED(res))
 			{
 				console::error("VR Error: xrGetSystem (HMD) failed: %s\n", result_to_string(res).c_str());
@@ -265,8 +322,11 @@ namespace vr
 			}
 
 			XrSystemProperties system_props{ XR_TYPE_SYSTEM_PROPERTIES };
-			if (XR_SUCCEEDED(xrGetSystemProperties(instance, system_id, &system_props)))
+			const XrResult system_props_result = xrGetSystemProperties(instance, system_id, &system_props);
+			trace_result("xrGetSystemProperties", system_props_result);
+			if (XR_SUCCEEDED(system_props_result))
 			{
+				trace("HMD/system name: %s", system_props.systemName);
 				console::info("VR: HMD System Name: '%s', Vendor ID: 0x%04X\n",
 					system_props.systemName, system_props.vendorId);
 			}
@@ -274,8 +334,10 @@ namespace vr
 			// 5. Query xrGetD3D11GraphicsRequirementsKHR
 			res = xrGetInstanceProcAddr(instance, "xrGetD3D11GraphicsRequirementsKHR",
 				reinterpret_cast<PFN_xrVoidFunction*>(&pfn_xrGetD3D11GraphicsRequirementsKHR));
+			trace_result("xrGetD3D11GraphicsRequirementsKHR resolution", res);
 			if (XR_FAILED(res) || !pfn_xrGetD3D11GraphicsRequirementsKHR)
 			{
+				if (XR_SUCCEEDED(res)) trace("FAILURE xrGetD3D11GraphicsRequirementsKHR resolution: null function pointer");
 				console::error("VR Error: Failed to resolve xrGetD3D11GraphicsRequirementsKHR function pointer.\n");
 				shutdown();
 				return false;
@@ -283,6 +345,7 @@ namespace vr
 
 			XrGraphicsRequirementsD3D11KHR graphics_reqs{ XR_TYPE_GRAPHICS_REQUIREMENTS_D3D11_KHR };
 			res = pfn_xrGetD3D11GraphicsRequirementsKHR(instance, system_id, &graphics_reqs);
+			trace_result("xrGetD3D11GraphicsRequirementsKHR call", res);
 			if (XR_FAILED(res))
 			{
 				console::error("VR Error: xrGetD3D11GraphicsRequirementsKHR failed: %s\n", result_to_string(res).c_str());
@@ -292,12 +355,15 @@ namespace vr
 
 			// 6. Validate and log graphics requirements
 			const D3D_FEATURE_LEVEL device_level = dx::device->GetFeatureLevel();
+			trace("D3D feature level: 0x%04X; required feature level: 0x%04X",
+				static_cast<unsigned int>(device_level), static_cast<unsigned int>(graphics_reqs.minFeatureLevel));
 			console::info("VR: D3D11 Device Feature Level: 0x%04X, OpenXR Required Minimum Feature Level: 0x%04X\n",
 				static_cast<unsigned int>(device_level),
 				static_cast<unsigned int>(graphics_reqs.minFeatureLevel));
 
 			if (device_level < graphics_reqs.minFeatureLevel)
 			{
+				trace("FAILURE D3D feature level below OpenXR minimum");
 				console::error("VR Error: Active D3D11 device feature level (0x%04X) is below OpenXR minimum (0x%04X).\n",
 					static_cast<unsigned int>(device_level),
 					static_cast<unsigned int>(graphics_reqs.minFeatureLevel));
@@ -310,6 +376,7 @@ namespace vr
 			HRESULT hr = dx::device->QueryInterface(IID_PPV_ARGS(&dxgi_device));
 			if (FAILED(hr) || !dxgi_device)
 			{
+				trace("FAILURE QueryInterface(IDXGIDevice) HRESULT 0x%08X", static_cast<unsigned int>(hr));
 				console::error("VR Error: dx::device QueryInterface(IDXGIDevice) failed (hr = 0x%08X).\n", hr);
 				shutdown();
 				return false;
@@ -319,6 +386,7 @@ namespace vr
 			hr = dxgi_device->GetAdapter(&dxgi_adapter);
 			if (FAILED(hr) || !dxgi_adapter)
 			{
+				trace("FAILURE IDXGIDevice::GetAdapter HRESULT 0x%08X", static_cast<unsigned int>(hr));
 				console::error("VR Error: IDXGIDevice::GetAdapter failed (hr = 0x%08X).\n", hr);
 				shutdown();
 				return false;
@@ -328,12 +396,16 @@ namespace vr
 			hr = dxgi_adapter->GetDesc(&adapter_desc);
 			if (FAILED(hr))
 			{
+				trace("FAILURE IDXGIAdapter::GetDesc HRESULT 0x%08X", static_cast<unsigned int>(hr));
 				console::error("VR Error: IDXGIAdapter::GetDesc failed (hr = 0x%08X).\n", hr);
 				shutdown();
 				return false;
 			}
 
 			const std::string desc_str = utils::string::convert(adapter_desc.Description);
+			trace("DXGI adapter description: %s", desc_str.c_str());
+			trace("DXGI adapter LUID: %08X:%08X", static_cast<unsigned int>(adapter_desc.AdapterLuid.HighPart), adapter_desc.AdapterLuid.LowPart);
+			trace("OpenXR required adapter LUID: %08X:%08X", static_cast<unsigned int>(graphics_reqs.adapterLuid.HighPart), graphics_reqs.adapterLuid.LowPart);
 			console::info("VR: DXGI Adapter Description: %s\n", desc_str.c_str());
 			console::info("VR: DXGI Adapter Vendor ID: 0x%04X, Device ID: 0x%04X\n",
 				adapter_desc.VendorId, adapter_desc.DeviceId);
@@ -345,6 +417,7 @@ namespace vr
 			// Compare and log OpenXR-required adapter LUID
 			const bool luid_match = (graphics_reqs.adapterLuid.LowPart == adapter_desc.AdapterLuid.LowPart &&
 			                         graphics_reqs.adapterLuid.HighPart == adapter_desc.AdapterLuid.HighPart);
+			trace("adapter LUID match: %s", luid_match ? "yes" : "no");
 			if (luid_match)
 			{
 				console::info("VR: OpenXR and DXGI adapter LUIDs match.\n");
@@ -363,8 +436,11 @@ namespace vr
 				0,
 				&view_count,
 				nullptr);
+			trace_result("xrEnumerateViewConfigurationViews count", res);
+			trace("runtime view count: %u", view_count);
 			if (XR_FAILED(res) || view_count == 0)
 			{
+				if (XR_SUCCEEDED(res)) trace("FAILURE xrEnumerateViewConfigurationViews returned zero views");
 				console::error("VR Error: xrEnumerateViewConfigurationViews failed to get view count: %s\n",
 					result_to_string(res).c_str());
 				shutdown();
@@ -373,6 +449,7 @@ namespace vr
 
 			if (view_count < 2)
 			{
+				trace("FAILURE PRIMARY_STEREO returned fewer than two views: %u", view_count);
 				console::error("VR Error: Runtime reported %u views for PRIMARY_STEREO; at least 2 views required.\n",
 					view_count);
 				shutdown();
@@ -387,6 +464,7 @@ namespace vr
 				view_count,
 				&view_count,
 				runtime_view_configs.data());
+			trace_result("xrEnumerateViewConfigurationViews list", res);
 			if (XR_FAILED(res))
 			{
 				console::error("VR Error: xrEnumerateViewConfigurationViews failed to retrieve view configs: %s\n",
@@ -398,6 +476,9 @@ namespace vr
 			console::info("VR: PRIMARY_STEREO view configuration enumerated: %u views\n", view_count);
 			for (uint32_t i = 0; i < view_count; ++i)
 			{
+				trace("recommended dimensions view %u: %ux%u", i,
+					runtime_view_configs[i].recommendedImageRectWidth,
+					runtime_view_configs[i].recommendedImageRectHeight);
 				console::info("VR:   View [%u]: Recommended Resolution: %ux%u (Max: %ux%u), Recommended Samples: %u\n",
 					i,
 					runtime_view_configs[i].recommendedImageRectWidth,
@@ -424,8 +505,10 @@ namespace vr
 				0,
 				&blend_mode_count,
 				nullptr);
+			trace_result("xrEnumerateEnvironmentBlendModes count", res);
 			if (XR_FAILED(res) || blend_mode_count == 0)
 			{
+				if (XR_SUCCEEDED(res)) trace("FAILURE xrEnumerateEnvironmentBlendModes returned zero modes");
 				console::error("VR Error: xrEnumerateEnvironmentBlendModes failed to query mode count: %s\n",
 					result_to_string(res).c_str());
 				shutdown();
@@ -440,6 +523,7 @@ namespace vr
 				blend_mode_count,
 				&blend_mode_count,
 				blend_modes.data());
+			trace_result("xrEnumerateEnvironmentBlendModes list", res);
 			if (XR_FAILED(res))
 			{
 				console::error("VR Error: xrEnumerateEnvironmentBlendModes failed to retrieve modes: %s\n",
@@ -452,6 +536,7 @@ namespace vr
 			bool opaque_supported = false;
 			for (const auto mode : blend_modes)
 			{
+				trace("supported blend mode: %s", blend_mode_to_string(mode).c_str());
 				console::info("VR:   Blend Mode: %s\n", blend_mode_to_string(mode).c_str());
 				if (mode == XR_ENVIRONMENT_BLEND_MODE_OPAQUE)
 				{
@@ -471,6 +556,7 @@ namespace vr
 				console::warn("VR Warning: XR_ENVIRONMENT_BLEND_MODE_OPAQUE unavailable; selecting first runtime-supported mode: %s\n",
 					blend_mode_to_string(selected_blend_mode).c_str());
 			}
+			trace("selected blend mode: %s", blend_mode_to_string(selected_blend_mode).c_str());
 
 			// 10. Create XrSession using XrGraphicsBindingD3D11KHR
 			XrGraphicsBindingD3D11KHR graphics_binding{ XR_TYPE_GRAPHICS_BINDING_D3D11_KHR };
@@ -481,6 +567,7 @@ namespace vr
 			session_ci.systemId = system_id;
 
 			res = xrCreateSession(instance, &session_ci, &session);
+			trace_result("xrCreateSession", res);
 			if (XR_FAILED(res))
 			{
 				console::error("VR Error: xrCreateSession failed: %s\n", result_to_string(res).c_str());
@@ -496,6 +583,7 @@ namespace vr
 			space_ci.poseInReferenceSpace.position = { 0.0f, 0.0f, 0.0f };
 
 			res = xrCreateReferenceSpace(session, &space_ci, &reference_space);
+			trace_result("xrCreateReferenceSpace", res);
 			if (XR_FAILED(res))
 			{
 				console::error("VR Error: xrCreateReferenceSpace (LOCAL) failed: %s\n", result_to_string(res).c_str());
@@ -504,11 +592,14 @@ namespace vr
 			}
 			console::info("VR: LOCAL reference space successfully created.\n");
 
+			trace("init_openxr success");
 			return true;
 		}
 
 		void handle_session_state_changed(const XrSessionState new_state)
 		{
+			trace("SESSION %s -> %s", session_state_to_string(session_state).c_str(),
+				session_state_to_string(new_state).c_str());
 			console::info("VR: Session state changed: %s -> %s\n",
 				session_state_to_string(session_state).c_str(),
 				session_state_to_string(new_state).c_str());
@@ -524,6 +615,7 @@ namespace vr
 					XrSessionBeginInfo begin_info{ XR_TYPE_SESSION_BEGIN_INFO };
 					begin_info.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
 					const XrResult res = xrBeginSession(session, &begin_info);
+					trace_result("xrBeginSession", res);
 					if (XR_SUCCEEDED(res))
 					{
 						session_running = true;
@@ -545,6 +637,7 @@ namespace vr
 				if (session_running && session != XR_NULL_HANDLE)
 				{
 					const XrResult res = xrEndSession(session);
+					trace_result("xrEndSession", res);
 					session_running = false;
 					console::info("VR: xrEndSession completed: %s\n", result_to_string(res).c_str());
 				}
@@ -592,6 +685,7 @@ namespace vr
 
 				if (XR_FAILED(res))
 				{
+					trace_result("xrPollEvent", res);
 					console::error("VR Error: xrPollEvent failed: %s\n", result_to_string(res).c_str());
 					break;
 				}
@@ -607,10 +701,12 @@ namespace vr
 				else if (event_buffer.type == XR_TYPE_EVENT_DATA_EVENTS_LOST)
 				{
 					const auto* lost_event = reinterpret_cast<const XrEventDataEventsLost*>(&event_buffer);
+					trace("XR_TYPE_EVENT_DATA_EVENTS_LOST count: %u", lost_event->lostEventCount);
 					console::warn("VR Warning: %u events lost.\n", lost_event->lostEventCount);
 				}
 				else if (event_buffer.type == XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING)
 				{
+					trace("XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING");
 					console::warn("VR Warning: Instance loss pending.\n");
 				}
 
@@ -631,17 +727,23 @@ namespace vr
 			XrResult res = xrWaitFrame(session, &wait_info, &frame_state);
 			if (XR_FAILED(res))
 			{
+				trace_result("xrWaitFrame", res);
 				console::error("VR Error: xrWaitFrame failed: %s\n", result_to_string(res).c_str());
 				return;
 			}
+			static bool first_wait = false;
+			if (!first_wait) { trace("first xrWaitFrame success"); first_wait = true; }
 
 			XrFrameBeginInfo begin_info{ XR_TYPE_FRAME_BEGIN_INFO };
 			res = xrBeginFrame(session, &begin_info);
 			if (XR_FAILED(res))
 			{
+				trace_result("xrBeginFrame", res);
 				console::error("VR Error: xrBeginFrame failed: %s\n", result_to_string(res).c_str());
 				return;
 			}
+			static bool first_begin = false;
+			if (!first_begin) { trace("first xrBeginFrame success"); first_begin = true; }
 
 			if (frame_state.shouldRender)
 			{
@@ -669,6 +771,8 @@ namespace vr
 
 				if (XR_SUCCEEDED(res))
 				{
+					static bool first_locate = false;
+					if (!first_locate) { trace("first xrLocateViews success"); first_locate = true; }
 					static auto last_pose_log = std::chrono::steady_clock::now();
 					const auto now = std::chrono::steady_clock::now();
 					if (now - last_pose_log >= std::chrono::seconds(1))
@@ -687,11 +791,16 @@ namespace vr
 								o.x, o.y, o.z, o.w,
 								f.angleLeft * rad_to_deg, f.angleRight * rad_to_deg,
 								f.angleUp * rad_to_deg, f.angleDown * rad_to_deg);
+							trace("VR Pose [%s Eye]: Pos(%.3f, %.3f, %.3f) Ori(%.3f, %.3f, %.3f, %.3f) FOV(L:%.1f R:%.1f U:%.1f D:%.1f deg)",
+								eye_names[i], p.x, p.y, p.z, o.x, o.y, o.z, o.w,
+								f.angleLeft * rad_to_deg, f.angleRight * rad_to_deg,
+								f.angleUp * rad_to_deg, f.angleDown * rad_to_deg);
 						}
 					}
 				}
 				else
 				{
+					trace_result("xrLocateViews", res);
 					console::warn("VR Warning: xrLocateViews failed: %s\n", result_to_string(res).c_str());
 				}
 			}
@@ -707,12 +816,20 @@ namespace vr
 			res = xrEndFrame(session, &end_info);
 			if (XR_FAILED(res))
 			{
+				trace_result("xrEndFrame", res);
 				console::error("VR Error: xrEndFrame failed: %s\n", result_to_string(res).c_str());
+			}
+			else
+			{
+				static bool first_end = false;
+				if (!first_end) { trace("first xrEndFrame success"); first_end = true; }
 			}
 		}
 
 		void render_tick()
 		{
+			static bool first_tick = false;
+			if (!first_tick) { trace("first renderer tick reached"); first_tick = true; }
 			if (current_init_state == initialization_state::disabled ||
 				current_init_state == initialization_state::failed)
 			{
@@ -724,8 +841,12 @@ namespace vr
 			{
 				if (!dx::device)
 				{
+					static bool waiting_logged = false;
+					if (!waiting_logged) { trace("waiting for dx::device"); waiting_logged = true; }
 					return;
 				}
+				trace("dx::device acquired: %p", static_cast<void*>(dx::device));
+				trace("feature level: 0x%04X", static_cast<unsigned int>(dx::device->GetFeatureLevel()));
 
 				current_init_state = initialization_state::initializing;
 				console::info("VR: Direct3D11 device detected. Initializing OpenXR...\n");
@@ -758,8 +879,22 @@ namespace vr
 	class component final : public component_interface
 	{
 	public:
+		void post_start() override
+		{
+			trace("component post_start");
+			trace("command line: %s", GetCommandLineA());
+			trace("-vr detected: %s", utils::flags::has_flag("vr") ? "yes" : "no");
+		}
+
+		void post_load() override
+		{
+			trace("component post_load");
+			trace("-vr detected: %s", utils::flags::has_flag("vr") ? "yes" : "no");
+		}
+
 		void post_unpack() override
 		{
+			trace("component post_unpack entered");
 			if (!utils::flags::has_flag("vr"))
 			{
 				return;
@@ -768,16 +903,20 @@ namespace vr
 			console::info("VR: -vr flag detected. Activating VR component.\n");
 			current_init_state = initialization_state::waiting_for_d3d;
 
+			trace("renderer scheduler registration begin");
 			scheduler::loop(render_tick, scheduler::pipeline::renderer);
+			trace("renderer scheduler registration complete");
 		}
 
 		void pre_destroy() override
 		{
+			trace("component pre_destroy entered");
 			if (current_init_state != initialization_state::disabled)
 			{
 				shutdown();
 				current_init_state = initialization_state::disabled;
 			}
+			trace("component pre_destroy complete");
 		}
 	};
 }
