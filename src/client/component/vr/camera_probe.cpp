@@ -115,17 +115,20 @@ namespace vr
 		}
 	}
 
-	class camera_probe_component final : public component_interface
+	namespace camera_probe
 	{
-	public:
-		void post_unpack() override
+		class component final : public component_interface
 		{
-			if (!utils::flags::has_flag("vr") || game::environment::is_dedi()) return;
-			draw_active_frame_hook.create(0x14026CB50, draw_active_frame_stub);
-			get_player_view_origin_hook.create(0x1408EC810, get_player_view_origin_stub);
-			bootstrap_trace("camera probes installed");
-		}
-	};
+		public:
+			void post_unpack() override
+			{
+				if (!utils::flags::has_flag("vr") || game::environment::is_dedi()) return;
+				draw_active_frame_hook.create(0x14026CB50, draw_active_frame_stub);
+				get_player_view_origin_hook.create(0x1408EC810, get_player_view_origin_stub);
+				bootstrap_trace("camera probes installed");
+			}
+		};
+	}
 }
 
-REGISTER_COMPONENT(vr::camera_probe_component)
+REGISTER_COMPONENT(vr::camera_probe::component)
