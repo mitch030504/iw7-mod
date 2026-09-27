@@ -900,6 +900,15 @@ namespace vr
 								f.angleLeft * rad_to_deg, f.angleRight * rad_to_deg,
 								f.angleUp * rad_to_deg, f.angleDown * rad_to_deg);
 						}
+						tracking_snapshot sample{};
+						const bool valid = get_tracking_snapshot(&sample);
+						bootstrap_trace("TRACKING SNAPSHOT generation=%llu valid=%s centerOrientationValid=%s viewStateFlags=0x%llX centerPos=(%.5f,%.5f,%.5f) centerQuat=(%.6f,%.6f,%.6f,%.6f)",
+							static_cast<unsigned long long>(sample.generation), valid ? "yes" : "no",
+							sample.center_orientation_valid ? "yes" : "no",
+							static_cast<unsigned long long>(sample.view_state_flags),
+							sample.center_position[0], sample.center_position[1], sample.center_position[2],
+							sample.center_orientation[0], sample.center_orientation[1],
+							sample.center_orientation[2], sample.center_orientation[3]);
 					}
 				}
 				else
