@@ -559,7 +559,7 @@ namespace updater
 		{
 			delete_old_file();
 
-			if (utils::flags::has_flag("noupdate"))
+			if (utils::flags::has_flag("noupdate") || utils::flags::has_flag("vr"))
 			{
 				return;
 			}
