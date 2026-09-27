@@ -2,9 +2,9 @@
 #include "vr.hpp"
 
 #include "loader/component_loader.hpp"
-#include "console/console.hpp"
-#include "scheduler.hpp"
-#include "directx.hpp"
+#include "component/console/console.hpp"
+#include "component/scheduler.hpp"
+#include "component/directx.hpp"
 
 #include <utils/flags.hpp>
 #include <utils/string.hpp>
