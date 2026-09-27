@@ -285,8 +285,28 @@ namespace vr
 			instance_ci.enabledExtensionCount = 1;
 			instance_ci.enabledExtensionNames = enabled_extensions;
 
+			bootstrap_trace("OpenXR requested API version: %u.%u.%u",
+				XR_VERSION_MAJOR(instance_ci.applicationInfo.apiVersion),
+				XR_VERSION_MINOR(instance_ci.applicationInfo.apiVersion),
+				XR_VERSION_PATCH(instance_ci.applicationInfo.apiVersion));
 			res = xrCreateInstance(&instance_ci, &instance);
 			trace_result("xrCreateInstance", res);
+			if (res == XR_ERROR_API_VERSION_UNSUPPORTED)
+			{
+				bootstrap_trace("OpenXR current API version rejected; retrying with OpenXR 1.0.0");
+				instance = XR_NULL_HANDLE;
+				instance_ci.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0);
+				bootstrap_trace("OpenXR fallback API version: %u.%u.%u",
+					XR_VERSION_MAJOR(instance_ci.applicationInfo.apiVersion),
+					XR_VERSION_MINOR(instance_ci.applicationInfo.apiVersion),
+					XR_VERSION_PATCH(instance_ci.applicationInfo.apiVersion));
+				res = xrCreateInstance(&instance_ci, &instance);
+				trace_result("xrCreateInstance OpenXR 1.0 fallback", res);
+				if (XR_SUCCEEDED(res))
+				{
+					bootstrap_trace("OpenXR API fallback accepted");
+				}
+			}
 			if (XR_FAILED(res))
 			{
 				console::error("VR Error: xrCreateInstance failed: %s\n", result_to_string(res).c_str());
@@ -302,6 +322,10 @@ namespace vr
 				bootstrap_trace("runtime name: %s", instance_props.runtimeName);
 				bootstrap_trace("runtime version: %u.%u.%u", XR_VERSION_MAJOR(instance_props.runtimeVersion),
 					XR_VERSION_MINOR(instance_props.runtimeVersion), XR_VERSION_PATCH(instance_props.runtimeVersion));
+				bootstrap_trace("OpenXR application API version in use: %u.%u.%u",
+					XR_VERSION_MAJOR(instance_ci.applicationInfo.apiVersion),
+					XR_VERSION_MINOR(instance_ci.applicationInfo.apiVersion),
+					XR_VERSION_PATCH(instance_ci.applicationInfo.apiVersion));
 				console::info("VR: OpenXR Runtime: %s (%u.%u.%u)\n",
 					instance_props.runtimeName,
 					XR_VERSION_MAJOR(instance_props.runtimeVersion),
