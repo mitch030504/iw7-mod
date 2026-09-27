@@ -37,15 +37,18 @@ namespace vr
 			float tan_half_fov_y;
 		};
 
-		refdef_sample sample_refdef()
+		bool sample_refdef(refdef_sample* sample)
 		{
-			refdef_sample sample{};
-			const auto& view = game::cg->refdef.view;
-			std::memcpy(sample.org, view.org, sizeof(sample.org));
-			std::memcpy(sample.axis, view.axis, sizeof(sample.axis));
-			sample.tan_half_fov_x = view.tanHalfFovX;
-			sample.tan_half_fov_y = view.tanHalfFovY;
-			return sample;
+			// 0x141FA6C88 is a per-client cg_s* table, as confirmed by the
+			// CG_DrawActiveFrame load at 0x14026CBC2. Probe local client 0 only.
+			const auto* const cg = *reinterpret_cast<game::cg_s* const*>(game::cg.get());
+			if (!cg) return false;
+			const auto& view = cg->refdef.view;
+			std::memcpy(sample->org, view.org, sizeof(sample->org));
+			std::memcpy(sample->axis, view.axis, sizeof(sample->axis));
+			sample->tan_half_fov_x = view.tanHalfFovX;
+			sample->tan_half_fov_y = view.tanHalfFovY;
+			return true;
 		}
 
 		void trace_refdef(const char* stage, const refdef_sample& sample)
@@ -63,7 +66,7 @@ namespace vr
 		{
 			const bool trace = local_client_num == 0 && log_due(last_draw_log);
 			refdef_sample before{};
-			if (trace) before = sample_refdef();
+			const bool before_available = trace && sample_refdef(&before);
 			inside_draw = true;
 			origin_calls_inside_draw = 0;
 			const int result = draw_active_frame_hook.invoke<int>(local_client_num, server_time,
@@ -71,11 +74,13 @@ namespace vr
 			inside_draw = false;
 			if (trace)
 			{
-				const auto after = sample_refdef();
-				trace_refdef("BEFORE", before);
-				trace_refdef("AFTER", after);
+				refdef_sample after{};
+				const bool after_available = sample_refdef(&after);
+				if (before_available) trace_refdef("BEFORE", before);
+				if (after_available) trace_refdef("AFTER", after);
 				bootstrap_trace("CG_DrawActiveFrame refdef changed=%s CG_GetPlayerViewOrigin calls inside=%u localClientNum=%d",
-					std::memcmp(&before, &after, sizeof(before)) ? "yes" : "no",
+					before_available && after_available ?
+						(std::memcmp(&before, &after, sizeof(before)) ? "yes" : "no") : "unavailable",
 					origin_calls_inside_draw, local_client_num);
 				tracking_snapshot tracking{};
 				const bool valid = get_tracking_snapshot(&tracking);
