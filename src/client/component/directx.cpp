@@ -2,6 +2,7 @@
 
 #include "loader/component_loader.hpp"
 #include "directx.hpp"
+#include "vr/vr.hpp"
 
 #include <utils/flags.hpp>
 #include <utils/hook.hpp>
@@ -10,6 +11,7 @@
 #include <d3d11.h>
 #include <d3d11on12.h>
 #include <wrl/client.h>
+#include <atomic>
 
 ID3D11Device* dx::device = nullptr;
 ID3D11DeviceContext* dx::deviceContext = nullptr;
@@ -85,6 +87,13 @@ namespace dx
 			D3D_FEATURE_LEVEL* out_feature_level,
 			ID3D11DeviceContext** out_immediate_context)
 		{
+			static std::atomic_uint trace_calls{ 0 };
+			const bool trace_this_call = utils::flags::has_flag("vr") && trace_calls.fetch_add(1) < 3;
+			if (trace_this_call)
+			{
+				vr::bootstrap_trace("D3D11CreateDevice stub CALLED adapter=%p driver_type=%u flags=0x%08X feature_level_count=%u",
+					adapter, static_cast<unsigned int>(driver_type), flags, feature_level_count);
+			}
 			if (GetModuleHandleA("renderdoc.dll"))
 			{
 				// the game creates its device with this flag, which crashes RenderDoc when the game creates its swap chain on the unhooked device
@@ -94,6 +103,7 @@ namespace dx
 			const auto real_device = out_device && out_immediate_context;
 			if (real_device && utils::flags::has_flag("d3d12"))
 			{
+				if (trace_this_call) vr::bootstrap_trace("D3D11On12 path entered");
 				if (SUCCEEDED(create_d3d12_objects(adapter)))
 				{
 					IUnknown* queues[] = { g_d3d12_queue.Get() };
@@ -112,8 +122,12 @@ namespace dx
 
 					if (SUCCEEDED(hr))
 					{
+						if (trace_this_call) vr::bootstrap_trace("D3D11On12CreateDevice HRESULT=0x%08X", static_cast<unsigned int>(hr));
 						store_dx12();
 						store_dx11(out_device, out_immediate_context);
+						if (trace_this_call && dx::device && dx::deviceContext)
+							vr::bootstrap_trace("dx::device acquired=%p dx::deviceContext=%p feature level=0x%04X",
+								dx::device, dx::deviceContext, static_cast<unsigned int>(dx::device->GetFeatureLevel()));
 						use_separate_shader_preload_cache();
 						return hr;
 					}
@@ -137,6 +151,13 @@ namespace dx
 				out_immediate_context);
 
 			store_dx11(out_device, out_immediate_context);
+			if (trace_this_call)
+			{
+				vr::bootstrap_trace("D3D11CreateDevice HRESULT=0x%08X", static_cast<unsigned int>(hr));
+				if (SUCCEEDED(hr) && dx::device && dx::deviceContext)
+					vr::bootstrap_trace("dx::device acquired=%p dx::deviceContext=%p feature level=0x%04X",
+						dx::device, dx::deviceContext, static_cast<unsigned int>(dx::device->GetFeatureLevel()));
+			}
 			return hr;
 		}
 	}

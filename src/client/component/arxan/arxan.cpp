@@ -5,9 +5,11 @@
 
 #include "component/game_module.hpp"
 #include "component/scheduler.hpp"
+#include "component/vr/vr.hpp"
 
 #include <utils/hook.hpp>
 #include <utils/string.hpp>
+#include <utils/flags.hpp>
 
 #define PRECOMPUTED_INTEGRITY_CHECKS
 #define PRECOMPUTED_BREAKPOINTS
@@ -538,6 +540,7 @@ namespace arxan
 	PVOID WINAPI add_vectored_exception_handler_stub(const ULONG first, const PVECTORED_EXCEPTION_HANDLER handler)
 	{
 		// a guard registers its handler right before executing its trap, which happens before post_unpack. patching here is intentional
+		if (utils::flags::has_flag("vr")) vr::bootstrap_trace("AddVectoredExceptionHandler stub CALLED");
 		patch_code();
 		return AddVectoredExceptionHandler(first, handler);
 	}

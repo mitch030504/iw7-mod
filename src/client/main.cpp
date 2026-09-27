@@ -4,6 +4,7 @@
 #include "game/game.hpp"
 
 #include "component/console/console.hpp"
+#include "component/vr/vr.hpp"
 
 #include <utils/string.hpp>
 #include <utils/io.hpp>
@@ -16,7 +17,13 @@ DECLSPEC_NORETURN void WINAPI exit_hook(const int code)
 
 DWORD_PTR WINAPI set_thread_affinity_mask(HANDLE hThread, DWORD_PTR dwThreadAffinityMask)
 {
+	if (utils::flags::has_flag("vr"))
+	{
+		vr::bootstrap_trace("SetThreadAffinityMask stub CALLED thread=%p mask=%p",
+			hThread, reinterpret_cast<void*>(dwThreadAffinityMask));
+	}
 	component_loader::post_unpack();
+	if (utils::flags::has_flag("vr")) vr::bootstrap_trace("SetThreadAffinityMask trigger completed post_unpack");
 	MH_ApplyQueued();
 
 	return SetThreadAffinityMask(hThread, dwThreadAffinityMask);
@@ -54,6 +61,7 @@ FARPROC load_binary(uint64_t* base_address)
 		}
 		else if (function == "SetThreadAffinityMask")
 		{
+			if (utils::flags::has_flag("vr")) vr::bootstrap_trace("import resolver: SetThreadAffinityMask -> IW7 stub");
 			return set_thread_affinity_mask;
 		}
 
@@ -189,6 +197,11 @@ int main()
 		}
 	}
 
+	if (utils::flags::has_flag("vr"))
+	{
+		vr::bootstrap_trace("transferring control to iw7_ship entry point entry_point=%p base_address=%p",
+			reinterpret_cast<void*>(entry_point), reinterpret_cast<void*>(game::base_address));
+	}
 	return static_cast<int>(entry_point());
 }
 
