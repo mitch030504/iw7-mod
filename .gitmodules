@@ -53,3 +53,6 @@
 [submodule "deps/DirectXTex"]
 	path = deps/DirectXTex
 	url = https://github.com/microsoft/DirectXTex.git
+[submodule "deps/OpenXR-SDK"]
+	path = deps/OpenXR-SDK
+	url = https://github.com/KhronosGroup/OpenXR-SDK.git

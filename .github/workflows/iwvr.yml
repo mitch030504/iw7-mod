@@ -1,0 +1,40 @@
+name: IWVR Build
+
+on:
+  push:
+    branches:
+      - iwvr/openxr-bootstrap
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build IWVR (Release)
+    runs-on: windows-2022
+    steps:
+      - name: Check out files
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          lfs: false
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Generate project files
+        run: tools\premake5.exe vs2022
+
+      - name: Build Release binaries
+        run: msbuild /m /v:minimal /p:Configuration=Release /p:Platform=x64 build\iw7-mod.sln
+
+      - name: Upload Release binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: iw7-mod-Release
+          path: |
+            build/bin/x64/Release/iw7-mod.exe
+            build/bin/x64/Release/iw7-mod.pdb
