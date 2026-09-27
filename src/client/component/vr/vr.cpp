@@ -227,11 +227,9 @@ namespace vr
 			};
 
 			XrInstanceCreateInfo instance_ci{ XR_TYPE_INSTANCE_CREATE_INFO };
-			std::strncpy(instance_ci.applicationInfo.applicationName, "IWVR",
-				sizeof(instance_ci.applicationInfo.applicationName) - 1);
+			utils::string::copy(instance_ci.applicationInfo.applicationName, "IWVR");
 			instance_ci.applicationInfo.applicationVersion = 1;
-			std::strncpy(instance_ci.applicationInfo.engineName, "IW7",
-				sizeof(instance_ci.applicationInfo.engineName) - 1);
+			utils::string::copy(instance_ci.applicationInfo.engineName, "IW7");
 			instance_ci.applicationInfo.engineVersion = 1;
 			instance_ci.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
 			instance_ci.enabledExtensionCount = 1;
