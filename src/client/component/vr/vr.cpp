@@ -21,6 +21,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <mutex>
+#include <cmath>
 
 #ifndef XR_USE_PLATFORM_WIN32
 #define XR_USE_PLATFORM_WIN32
@@ -34,6 +35,20 @@
 
 namespace vr
 {
+	namespace
+	{
+		std::mutex tracking_mutex;
+		tracking_snapshot latest_tracking{};
+	}
+
+	bool get_tracking_snapshot(tracking_snapshot* out)
+	{
+		if (!out) return false;
+		std::lock_guard<std::mutex> lock(tracking_mutex);
+		*out = latest_tracking;
+		return out->valid;
+	}
+
 	void bootstrap_trace(const char* format, ...) noexcept
 	{
 		try
@@ -192,6 +207,12 @@ namespace vr
 
 		void shutdown()
 		{
+			{
+				std::lock_guard<std::mutex> lock(tracking_mutex);
+				latest_tracking.valid = false;
+				latest_tracking.center_orientation_valid = false;
+				++latest_tracking.generation;
+			}
 			if (session_running && session != XR_NULL_HANDLE)
 			{
 				trace_result("xrEndSession", xrEndSession(session));
@@ -797,6 +818,65 @@ namespace vr
 				{
 					static bool first_locate = false;
 					if (!first_locate) { bootstrap_trace("first xrLocateViews success"); first_locate = true; }
+					static XrViewStateFlags previous_flags = ~XrViewStateFlags{ 0 };
+					if (view_state.viewStateFlags != previous_flags)
+					{
+						bootstrap_trace("xrLocateViews viewStateFlags changed: 0x%llX -> 0x%llX",
+							static_cast<unsigned long long>(previous_flags),
+							static_cast<unsigned long long>(view_state.viewStateFlags));
+						previous_flags = view_state.viewStateFlags;
+					}
+					if (view_count_output >= 2 && runtime_views.size() >= 2)
+					{
+						tracking_snapshot next{};
+						next.predicted_display_time = frame_state.predictedDisplayTime;
+						next.view_state_flags = view_state.viewStateFlags;
+						for (unsigned int i = 0; i < 2; ++i)
+						{
+							const auto& view = runtime_views[i];
+							next.eyes[i].position[0] = view.pose.position.x;
+							next.eyes[i].position[1] = view.pose.position.y;
+							next.eyes[i].position[2] = view.pose.position.z;
+							next.eyes[i].orientation[0] = view.pose.orientation.x;
+							next.eyes[i].orientation[1] = view.pose.orientation.y;
+							next.eyes[i].orientation[2] = view.pose.orientation.z;
+							next.eyes[i].orientation[3] = view.pose.orientation.w;
+							next.eyes[i].fov[0] = view.fov.angleLeft;
+							next.eyes[i].fov[1] = view.fov.angleRight;
+							next.eyes[i].fov[2] = view.fov.angleUp;
+							next.eyes[i].fov[3] = view.fov.angleDown;
+						}
+						for (unsigned int j = 0; j < 3; ++j)
+							next.center_position[j] = (next.eyes[0].position[j] + next.eyes[1].position[j]) * 0.5f;
+						float dot = 0.0f;
+						for (unsigned int j = 0; j < 4; ++j)
+							dot += next.eyes[0].orientation[j] * next.eyes[1].orientation[j];
+						float magnitude_squared = 0.0f;
+						for (unsigned int j = 0; j < 4; ++j)
+						{
+							next.center_orientation[j] = next.eyes[0].orientation[j] +
+								(dot < 0.0f ? -next.eyes[1].orientation[j] : next.eyes[1].orientation[j]);
+							magnitude_squared += next.center_orientation[j] * next.center_orientation[j];
+						}
+						next.center_orientation_valid = std::isfinite(magnitude_squared) && magnitude_squared > 1.0e-8f;
+						if (next.center_orientation_valid)
+						{
+							const float inverse_magnitude = 1.0f / std::sqrt(magnitude_squared);
+							for (float& component : next.center_orientation) component *= inverse_magnitude;
+						}
+						else
+						{
+							for (float& component : next.center_orientation) component = 0.0f;
+						}
+						next.valid = next.center_orientation_valid &&
+							(view_state.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT) &&
+							(view_state.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT);
+						{
+							std::lock_guard<std::mutex> lock(tracking_mutex);
+							next.generation = latest_tracking.generation + 1;
+							latest_tracking = next;
+						}
+					}
 					static auto last_pose_log = std::chrono::steady_clock::now();
 					const auto now = std::chrono::steady_clock::now();
 					if (now - last_pose_log >= std::chrono::seconds(1))
