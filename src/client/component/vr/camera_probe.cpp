@@ -8,6 +8,8 @@
 #include <utils/hook.hpp>
 
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
 
 namespace vr
@@ -37,13 +39,35 @@ namespace vr
 			float tan_half_fov_y;
 		};
 
-		bool sample_refdef(refdef_sample* sample)
+		bool sample_refdef(int local_client_num, refdef_sample* sample)
 		{
-			// 0x141FA6C88 is a per-client cg_s* table, as confirmed by the
-			// CG_DrawActiveFrame load at 0x14026CBC2. Probe local client 0 only.
-			const auto* const cg = *reinterpret_cast<game::cg_s* const*>(game::cg.get());
-			if (!cg) return false;
-			const auto& view = cg->refdef.view;
+			// IW7 has two local-client slots. The symbol points at the cg_s*
+			// table, not at a cg_s. A slot can be transiently invalid while
+			// changing game modes, so neither read may dereference game memory.
+			if (!sample || local_client_num < 0 || local_client_num >= 2) return false;
+			static_assert(offsetof(game::cg_s, refdef) == 0x4B38);
+			static_assert(offsetof(game::refdef_t, view) == 0x10);
+			static_assert(offsetof(game::RefdefView, org) == 0x08);
+
+			const auto* const table = reinterpret_cast<game::cg_s* const*>(game::cg.get());
+			game::cg_s* cg = nullptr;
+			SIZE_T bytes_read = 0;
+			if (!ReadProcessMemory(GetCurrentProcess(), table + local_client_num,
+				&cg, sizeof(cg), &bytes_read) || bytes_read != sizeof(cg) || !cg)
+			{
+				return false;
+			}
+
+			const auto view_address = reinterpret_cast<std::uintptr_t>(cg) +
+				offsetof(game::cg_s, refdef) + offsetof(game::refdef_t, view);
+			game::RefdefView view{};
+			bytes_read = 0;
+			if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(view_address),
+				&view, sizeof(view), &bytes_read) || bytes_read != sizeof(view))
+			{
+				return false;
+			}
+
 			std::memcpy(sample->org, view.org, sizeof(sample->org));
 			std::memcpy(sample->axis, view.axis, sizeof(sample->axis));
 			sample->tan_half_fov_x = view.tanHalfFovX;
@@ -66,7 +90,7 @@ namespace vr
 		{
 			const bool trace = local_client_num == 0 && log_due(last_draw_log);
 			refdef_sample before{};
-			const bool before_available = trace && sample_refdef(&before);
+			const bool before_available = trace && sample_refdef(local_client_num, &before);
 			inside_draw = true;
 			origin_calls_inside_draw = 0;
 			const int result = draw_active_frame_hook.invoke<int>(local_client_num, server_time,
@@ -75,16 +99,18 @@ namespace vr
 			if (trace)
 			{
 				refdef_sample after{};
-				const bool after_available = sample_refdef(&after);
+				const bool after_available = sample_refdef(local_client_num, &after);
 				if (before_available) trace_refdef("BEFORE", before);
+				else bootstrap_trace("CG_DrawActiveFrame BEFORE refdef unavailable localClientNum=%d", local_client_num);
 				if (after_available) trace_refdef("AFTER", after);
+				else bootstrap_trace("CG_DrawActiveFrame AFTER refdef unavailable localClientNum=%d", local_client_num);
 				bootstrap_trace("CG_DrawActiveFrame refdef changed=%s CG_GetPlayerViewOrigin calls inside=%u localClientNum=%d",
 					before_available && after_available ?
 						(std::memcmp(&before, &after, sizeof(before)) ? "yes" : "no") : "unavailable",
 					origin_calls_inside_draw, local_client_num);
 				tracking_snapshot tracking{};
 				const bool valid = get_tracking_snapshot(&tracking);
-				bootstrap_trace("CAMERA PROBE: game origin=(%.4f,%.4f,%.4f) axis[0]=(%.4f,%.4f,%.4f) axis[1]=(%.4f,%.4f,%.4f) axis[2]=(%.4f,%.4f,%.4f) raw HMD center position=(%.4f,%.4f,%.4f) quaternion=(%.5f,%.5f,%.5f,%.5f) generation=%llu viewStateFlags=0x%llX valid=%s centerOrientationValid=%s",
+				if (after_available) bootstrap_trace("CAMERA PROBE: game origin=(%.4f,%.4f,%.4f) axis[0]=(%.4f,%.4f,%.4f) axis[1]=(%.4f,%.4f,%.4f) axis[2]=(%.4f,%.4f,%.4f) raw HMD center position=(%.4f,%.4f,%.4f) quaternion=(%.5f,%.5f,%.5f,%.5f) generation=%llu viewStateFlags=0x%llX valid=%s centerOrientationValid=%s",
 					after.org[0], after.org[1], after.org[2],
 					after.axis[0][0], after.axis[0][1], after.axis[0][2],
 					after.axis[1][0], after.axis[1][1], after.axis[1][2],
@@ -95,6 +121,9 @@ namespace vr
 					static_cast<unsigned long long>(tracking.generation),
 					static_cast<unsigned long long>(tracking.view_state_flags),
 					valid ? "yes" : "no", tracking.center_orientation_valid ? "yes" : "no");
+				else bootstrap_trace("CAMERA PROBE: refdef unavailable localClientNum=%d generation=%llu viewStateFlags=0x%llX valid=%s",
+					local_client_num, static_cast<unsigned long long>(tracking.generation),
+					static_cast<unsigned long long>(tracking.view_state_flags), valid ? "yes" : "no");
 			}
 			return result;
 		}
