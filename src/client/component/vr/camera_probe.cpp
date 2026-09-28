@@ -20,6 +20,7 @@ namespace vr
 		utils::hook::detour get_player_view_origin_hook;
 		std::atomic<unsigned long long> last_draw_log{ 0 };
 		std::atomic<unsigned long long> last_origin_log{ 0 };
+		std::atomic<std::uintptr_t> cached_cg[2]{};
 		thread_local bool inside_draw = false;
 		thread_local unsigned int origin_calls_inside_draw = 0;
 
@@ -39,35 +40,56 @@ namespace vr
 			float tan_half_fov_y;
 		};
 
-		bool sample_refdef(int local_client_num, refdef_sample* sample)
+		// Keep SEH confined to this leaf diagnostic copy. A stale cg pointer is
+		// expected at some client transitions and must only make a sample fail.
+		__declspec(noinline) bool safe_copy_memory(void* dst, const void* src, size_t size)
 		{
-			// IW7 has two local-client slots. The symbol points at the cg_s*
-			// table, not at a cg_s. A slot can be transiently invalid while
-			// changing game modes, so neither read may dereference game memory.
-			if (!sample || local_client_num < 0 || local_client_num >= 2) return false;
-			static_assert(offsetof(game::cg_s, refdef) == 0x4B38);
-			static_assert(offsetof(game::refdef_t, view) == 0x10);
-			static_assert(offsetof(game::RefdefView, org) == 0x08);
-
-			const auto* const table = reinterpret_cast<game::cg_s* const*>(game::cg.get());
-			game::cg_s* cg = nullptr;
-			SIZE_T bytes_read = 0;
-			if (!ReadProcessMemory(GetCurrentProcess(), table + local_client_num,
-				&cg, sizeof(cg), &bytes_read) || bytes_read != sizeof(cg) || !cg)
+			__try
+			{
+				std::memcpy(dst, src, size);
+				return true;
+			}
+			__except (EXCEPTION_EXECUTE_HANDLER)
 			{
 				return false;
 			}
+		}
 
-			const auto view_address = reinterpret_cast<std::uintptr_t>(cg) +
-				offsetof(game::cg_s, refdef) + offsetof(game::refdef_t, view);
+		static_assert(offsetof(game::cg_s, predictedPlayerState) == 0x08);
+		static_assert(offsetof(game::cg_s, refdef) == 0x4B38);
+		static_assert(offsetof(game::refdef_t, view) == 0x10);
+		static_assert(offsetof(game::RefdefView, org) == 0x08);
+
+		enum class refdef_source { unavailable, global_table, cached_player_state };
+
+		const char* source_name(refdef_source source)
+		{
+			switch (source)
+			{
+			case refdef_source::global_table: return "table";
+			case refdef_source::cached_player_state: return "cached-ps";
+			default: return "unavailable";
+			}
+		}
+
+		bool read_table_cg(int local_client_num, game::cg_s** cg)
+		{
+			if (!cg || local_client_num < 0 || local_client_num >= 2) return false;
+			*cg = nullptr;
+			const auto* table = reinterpret_cast<game::cg_s* const*>(game::cg.get());
+			return safe_copy_memory(cg, table + local_client_num, sizeof(*cg));
+		}
+
+		bool sample_refdef_from_cg(std::uintptr_t cg_address, refdef_sample* sample)
+		{
+			if (!sample || !cg_address) return false;
+			const auto view_address = cg_address + offsetof(game::cg_s, refdef) +
+				offsetof(game::refdef_t, view);
 			game::RefdefView view{};
-			bytes_read = 0;
-			if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(view_address),
-				&view, sizeof(view), &bytes_read) || bytes_read != sizeof(view))
+			if (!safe_copy_memory(&view, reinterpret_cast<const void*>(view_address), sizeof(view)))
 			{
 				return false;
 			}
-
 			std::memcpy(sample->org, view.org, sizeof(sample->org));
 			std::memcpy(sample->axis, view.axis, sizeof(sample->axis));
 			sample->tan_half_fov_x = view.tanHalfFovX;
@@ -75,10 +97,30 @@ namespace vr
 			return true;
 		}
 
-		void trace_refdef(const char* stage, const refdef_sample& sample)
+		bool sample_refdef(int local_client_num, refdef_sample* sample, refdef_source* source)
 		{
-			bootstrap_trace("CG_DrawActiveFrame %s org=(%.4f,%.4f,%.4f) axis[0]=(%.4f,%.4f,%.4f) axis[1]=(%.4f,%.4f,%.4f) axis[2]=(%.4f,%.4f,%.4f) tanHalfFovX=%.5f tanHalfFovY=%.5f",
-				stage, sample.org[0], sample.org[1], sample.org[2],
+			if (source) *source = refdef_source::unavailable;
+			if (!sample || local_client_num < 0 || local_client_num >= 2) return false;
+			game::cg_s* table_cg = nullptr;
+			if (read_table_cg(local_client_num, &table_cg) && table_cg &&
+				sample_refdef_from_cg(reinterpret_cast<std::uintptr_t>(table_cg), sample))
+			{
+				if (source) *source = refdef_source::global_table;
+				return true;
+			}
+			const auto cached = cached_cg[local_client_num].load(std::memory_order_acquire);
+			if (sample_refdef_from_cg(cached, sample))
+			{
+				if (source) *source = refdef_source::cached_player_state;
+				return true;
+			}
+			return false;
+		}
+
+		void trace_refdef(const char* stage, const refdef_sample& sample, refdef_source source)
+		{
+			bootstrap_trace("CG_DrawActiveFrame %s refdefSource=%s org=(%.4f,%.4f,%.4f) axis[0]=(%.4f,%.4f,%.4f) axis[1]=(%.4f,%.4f,%.4f) axis[2]=(%.4f,%.4f,%.4f) tanHalfFovX=%.5f tanHalfFovY=%.5f",
+				stage, source_name(source), sample.org[0], sample.org[1], sample.org[2],
 				sample.axis[0][0], sample.axis[0][1], sample.axis[0][2],
 				sample.axis[1][0], sample.axis[1][1], sample.axis[1][2],
 				sample.axis[2][0], sample.axis[2][1], sample.axis[2][2],
@@ -90,7 +132,8 @@ namespace vr
 		{
 			const bool trace = local_client_num == 0 && log_due(last_draw_log);
 			refdef_sample before{};
-			const bool before_available = trace && sample_refdef(local_client_num, &before);
+			refdef_source before_source = refdef_source::unavailable;
+			const bool before_available = trace && sample_refdef(local_client_num, &before, &before_source);
 			inside_draw = true;
 			origin_calls_inside_draw = 0;
 			const int result = draw_active_frame_hook.invoke<int>(local_client_num, server_time,
@@ -99,11 +142,12 @@ namespace vr
 			if (trace)
 			{
 				refdef_sample after{};
-				const bool after_available = sample_refdef(local_client_num, &after);
-				if (before_available) trace_refdef("BEFORE", before);
-				else bootstrap_trace("CG_DrawActiveFrame BEFORE refdef unavailable localClientNum=%d", local_client_num);
-				if (after_available) trace_refdef("AFTER", after);
-				else bootstrap_trace("CG_DrawActiveFrame AFTER refdef unavailable localClientNum=%d", local_client_num);
+				refdef_source after_source = refdef_source::unavailable;
+				const bool after_available = sample_refdef(local_client_num, &after, &after_source);
+				if (before_available) trace_refdef("BEFORE", before, before_source);
+				else bootstrap_trace("CG_DrawActiveFrame BEFORE refdef unavailable refdefSource=unavailable localClientNum=%d", local_client_num);
+				if (after_available) trace_refdef("AFTER", after, after_source);
+				else bootstrap_trace("CG_DrawActiveFrame AFTER refdef unavailable refdefSource=unavailable localClientNum=%d", local_client_num);
 				bootstrap_trace("CG_DrawActiveFrame refdef changed=%s CG_GetPlayerViewOrigin calls inside=%u localClientNum=%d",
 					before_available && after_available ?
 						(std::memcmp(&before, &after, sizeof(before)) ? "yes" : "no") : "unavailable",
@@ -133,8 +177,32 @@ namespace vr
 		{
 			const bool result = get_player_view_origin_hook.invoke<bool>(local_client_num, ps, out_origin);
 			if (inside_draw) ++origin_calls_inside_draw;
+			std::uintptr_t cg_address = 0;
+			if (ps && local_client_num >= 0 && local_client_num < 2)
+			{
+				cg_address = reinterpret_cast<std::uintptr_t>(ps) -
+					offsetof(game::cg_s, predictedPlayerState);
+				cached_cg[local_client_num].store(cg_address, std::memory_order_release);
+			}
 			if (log_due(last_origin_log))
 			{
+				game::cg_s* table_cg = nullptr;
+				const bool table_read = read_table_cg(local_client_num, &table_cg);
+				bootstrap_trace("CG POINTER: client=%d psDerived=%p table=%p match=%s tableRead=%s",
+					local_client_num, reinterpret_cast<const void*>(cg_address), table_cg,
+					table_read && cg_address && reinterpret_cast<std::uintptr_t>(table_cg) == cg_address ? "yes" : "no",
+					table_read ? "success" : "failure");
+				refdef_sample origin_refdef{};
+				if (sample_refdef_from_cg(cg_address, &origin_refdef))
+				{
+					bootstrap_trace("CG_GetPlayerViewOrigin REFDEF org=(%.4f,%.4f,%.4f) axis[0]=(%.4f,%.4f,%.4f) axis[1]=(%.4f,%.4f,%.4f) axis[2]=(%.4f,%.4f,%.4f) tanHalfFovX=%.5f tanHalfFovY=%.5f",
+						origin_refdef.org[0], origin_refdef.org[1], origin_refdef.org[2],
+						origin_refdef.axis[0][0], origin_refdef.axis[0][1], origin_refdef.axis[0][2],
+						origin_refdef.axis[1][0], origin_refdef.axis[1][1], origin_refdef.axis[1][2],
+						origin_refdef.axis[2][0], origin_refdef.axis[2][1], origin_refdef.axis[2][2],
+						origin_refdef.tan_half_fov_x, origin_refdef.tan_half_fov_y);
+				}
+				else bootstrap_trace("CG_GetPlayerViewOrigin REFDEF unavailable localClientNum=%d", local_client_num);
 				const float* origin = out_origin ? *out_origin : nullptr;
 				const float* ps_origin = ps ? ps->origin : nullptr;
 				const float* angles = ps ? ps->viewangles : nullptr;
